@@ -44,6 +44,34 @@ BOTTOM_MARGIN = 70            # stay above docks/taskbars
 WEB_URL = "https://github.com/Nyxtena"   # opens on click
 BOREDOM_S = (20, 45)          # idle before choosing a new antics
 DEBUG = "--debug" in sys.argv  # magenta box + console diagnostics, no transparency
+VERSION = "5.1"               # bump on every pushed fix so we know what's running
+
+
+def diagnose():
+    """Print environment diagnostics for transparency troubleshooting."""
+    print(f"nekopet version: {VERSION}")
+    print(f"python: {sys.version.split()[0]}")
+    print(f"XDG_SESSION_TYPE: {os.environ.get('XDG_SESSION_TYPE', '(unset)')}")
+    print(f"WAYLAND_DISPLAY: {os.environ.get('WAYLAND_DISPLAY', '(unset)')}")
+    print(f"DISPLAY: {os.environ.get('DISPLAY', '(unset)')}")
+    try:
+        import PIL
+        print(f"pillow: {PIL.__version__} OK")
+    except ImportError:
+        print("pillow: MISSING")
+    try:
+        import Xlib
+        print(f"python-xlib: {Xlib.__version__} OK")
+    except ImportError:
+        print("python-xlib: MISSING — transparency will fall back to magenta box")
+        return
+    try:
+        from Xlib import display
+        d = display.Display()
+        ext = d.query_extension("SHAPE")
+        print(f"SHAPE extension: {'present' if ext and ext.present else 'MISSING'}")
+    except Exception as e:
+        print(f"X connection failed: {e}")
 
 
 def key_out_background(img, thresh=245):
@@ -504,4 +532,7 @@ class Nekopet(tk.Tk):
 
 
 if __name__ == "__main__":
-    Nekopet().mainloop()
+    if "--diagnose" in sys.argv:
+        diagnose()
+    else:
+        Nekopet().mainloop()
