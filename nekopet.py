@@ -118,6 +118,15 @@ class Nekopet(tk.Tk):
         # sprite frames (PIL -> PhotoImage), rebuilt per-frame for animation
         self.base = Image.open(SPRITE_PATH).convert("RGBA").resize(
             (SIZE, SIZE), Image.LANCZOS)
+        # walk cycle frames (side view, facing right)
+        self.walk_frames = []
+        for i in range(4):
+            wp = os.path.join(os.path.dirname(os.path.abspath(__file__)), f"walk{i}.png")
+            if os.path.exists(wp):
+                fr = Image.open(wp).convert("RGBA")
+                s = SIZE / fr.size[1]
+                self.walk_frames.append(fr.resize((int(fr.size[0] * s), SIZE), Image.LANCZOS))
+        self.walk_phase = 0
         self.facing = 1          # 1 = right, -1 = left
         self.bob = 0             # walk bounce phase
         self.squash = 0          # squash & stretch timer
@@ -325,14 +334,21 @@ class Nekopet(tk.Tk):
         self.move_window()
 
     # ------------------------------------------------------------ rendering
+    WALK_STATES = {"walk", "pounce", "climb_up", "climb_down", "win_climb_up",
+                   "win_down", "climb_across", "win_across", "trapped"}
+
     def render(self):
-        img = self.base
+        moving = self.state in self.WALK_STATES
+        if moving and self.walk_frames:
+            # real walk cycle: advance a frame every few ticks
+            self.walk_phase += 1
+            img = self.walk_frames[(self.walk_phase // 4) % len(self.walk_frames)]
+        else:
+            img = self.base
         if self.facing < 0:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         # walk bounce + squash & stretch
-        bounce = abs(math.sin(self.bob)) * 6 if self.state in (
-            "walk", "pounce", "climb_up", "climb_down", "win_climb_up",
-            "win_down", "climb_across", "win_across", "trapped") else 0
+        bounce = abs(math.sin(self.bob)) * 6 if moving else 0
         tilt = math.sin(self.bob) * 6 if self.state in ("walk", "dance") else 0
         if self.state == "sit":
             img = img.resize((SIZE, int(SIZE * 0.82)), Image.LANCZOS)
