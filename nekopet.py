@@ -25,6 +25,7 @@ import shutil
 import subprocess
 import sys
 import tkinter as tk
+import traceback
 import webbrowser
 
 try:
@@ -42,6 +43,7 @@ CLIMB_SPEED = 3
 BOTTOM_MARGIN = 70            # stay above docks/taskbars
 WEB_URL = "https://github.com/Nyxtena"   # opens on click
 BOREDOM_S = (20, 45)          # idle before choosing a new antics
+DEBUG = "--debug" in sys.argv  # magenta box + console diagnostics, no transparency
 
 
 # ------------------------------------------------------- window detection
@@ -107,10 +109,13 @@ class Nekopet(tk.Tk):
         self.overrideredirect(True)          # borderless
         self.attributes("-topmost", True)    # always on top
         self.config(bg="magenta")
-        try:
-            self.attributes("-transparentcolor", "magenta")  # click-through bg
-        except tk.TclError:
-            pass  # compositor without transparentcolor: magenta box fallback
+        if not DEBUG:
+            try:
+                self.attributes("-transparentcolor", "magenta")  # click-through bg
+            except tk.TclError:
+                pass  # compositor without transparentcolor: magenta box fallback
+        else:
+            print(f"[nekopet] DEBUG on — screen {self.winfo_screenwidth()}x{self.winfo_screenheight()}", flush=True)
 
         self.sw = self.winfo_screenwidth()
         self.sh = self.winfo_screenheight()
@@ -137,8 +142,9 @@ class Nekopet(tk.Tk):
                                 font=("Helvetica", 18, "bold"), bd=0)
         self.overlay.place(relx=0.5, rely=-0.15, anchor="s")
 
-        # position / movement
-        self.x = random.randint(0, max(1, self.sw - SIZE))
+        # position / movement — spawn bottom-center so multi-monitor
+        # virtual desktops can't strand her in a dead zone
+        self.x = self.sw // 2 - SIZE // 2
         self.y = self.sh - BOTTOM_MARGIN - SIZE
         self.tx, self.ty = self.x, self.y
         self.speed = WALK_SPEED
@@ -167,6 +173,8 @@ class Nekopet(tk.Tk):
     # ------------------------------------------------------------ windows
     def refresh_windows(self):
         self.windows = get_window_rects()
+        if DEBUG:
+            print(f"[nekopet] detected {len(self.windows)} windows", flush=True)
 
     def refresh_windows_loop(self):
         self.refresh_windows()
@@ -174,7 +182,12 @@ class Nekopet(tk.Tk):
 
     # ------------------------------------------------------------ helpers
     def move_window(self):
+        # clamp to the virtual desktop so she can never leave it
+        self.x = max(0, min(self.x, self.sw - SIZE))
+        self.y = max(0, min(self.y, self.sh - SIZE))
         self.geometry(f"{SIZE}x{SIZE}+{int(self.x)}+{int(self.y)}")
+        if DEBUG and int(self.x) % 50 == 0:
+            print(f"[nekopet] state={self.state} pos=({int(self.x)},{int(self.y)})", flush=True)
 
     def set_overlay(self, text, ticks=20):
         self.overlay_text = text
@@ -258,9 +271,13 @@ class Nekopet(tk.Tk):
             self.set_overlay("!", 15)
 
     def tick(self):
-        if not self.paused:
-            self.update_state()
-            self.render()
+        try:
+            if not self.paused:
+                self.update_state()
+                self.render()
+        except Exception:
+            # never let the animation loop die silently — log and continue
+            traceback.print_exc()
         self.after(TICK_MS, self.tick)
 
     def update_state(self):
