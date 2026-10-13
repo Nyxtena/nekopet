@@ -31,6 +31,15 @@ works on recent versions.
 python3 nekopet.py
 ```
 
+Useful flags:
+
+- `python3 nekopet.py --debug` — magenta box (no transparency) + console
+  diagnostics: screen size, detected windows, live state/position
+- `python3 nekopet.py --diagnose` — print environment info and exit
+  (version, X11/Wayland, pillow/python-xlib, SHAPE extension)
+- `python3 nekopet.py --no-shape` — disable X shaping entirely
+  (falls back to the magenta box; useful for troubleshooting)
+
 ## Controls
 
 | Input | What happens |
