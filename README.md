@@ -12,12 +12,18 @@ click her **tail** at your own risk. Every click also opens
 
 ```bash
 sudo apt install python3-tk wmctrl
-pip install pillow
+pip install pillow python-xlib
 ```
 
 `wmctrl` is optional but recommended — it's how she sees your windows so she
 can climb them. Without it (e.g. on Wayland) she falls back to screen-edge
 mode and still does all her cute stuff.
+
+`python-xlib` gives her true per-pixel transparency via the X Shape extension
+(tkinter's built-in transparency flag is Windows/macOS-only, so without this
+she'd be stuck in a magenta box). If it's missing she'll still run, just
+with the box. On Wayland she runs through XWayland, where shaping usually
+works on recent versions.
 
 ## Run
 
