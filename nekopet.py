@@ -44,7 +44,8 @@ BOTTOM_MARGIN = 70            # stay above docks/taskbars
 WEB_URL = "https://github.com/Nyxtena"   # opens on click
 BOREDOM_S = (20, 45)          # idle before choosing a new antics
 DEBUG = "--debug" in sys.argv  # magenta box + console diagnostics, no transparency
-VERSION = "5.1"               # bump on every pushed fix so we know what's running
+NO_SHAPE = "--no-shape" in sys.argv  # disable X shaping entirely (fallback)
+VERSION = "5.2"               # bump on every pushed fix so we know what's running
 
 
 def diagnose():
@@ -72,9 +73,43 @@ def diagnose():
         print(f"SHAPE extension: {'present' if ext and ext.present else 'MISSING'}")
     except Exception as e:
         print(f"X connection failed: {e}")
+    print("tip: run with --no-shape to disable X shaping entirely")
 
 
 def key_out_background(img, thresh=245):
+    """Make near-white background pixels transparent (returns a copy)."""
+    img = img.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if r >= thresh and g >= thresh and b >= thresh:
+                px[x, y] = (r, g, b, 0)
+    return img
+
+
+def shape_rects(pil_img, thresh=100):
+    """Opaque runs per row of an RGBA image -> [(x, y, w, 1), ...]."""
+    w, h = pil_img.size
+    px = pil_img.split()[3].load()
+    rects = []
+    for y in range(h):
+        x = 0
+        while x < w:
+            while x < w and px[x, y] <= thresh:
+                x += 1
+            x0 = x
+            while x < w and px[x, y] > thresh:
+                x += 1
+            if x > x0:
+                rects.append((x0, y, x - x0, 1))
+    return rects
+
+
+def mirror_rects(rects, width):
+    """Mirror rect list horizontally (for facing left)."""
+    return [(width - x - w, y, w, h) for (x, y, w, h) in rects]
     """Make near-white background pixels transparent (in place-safe copy)."""
     img = img.convert("RGBA")
     px = img.load()
@@ -176,6 +211,16 @@ class Nekopet(tk.Tk):
         self.walk_phase = 0
         self._xshape = None      # lazy X Shape extension state
         self._shape_key = None
+        # precompute shape rects once (base + walk frames, both facings)
+        self._shape_cache = {("base", 1): shape_rects(self.base)}
+        self._shape_cache[("base", -1)] = mirror_rects(
+            self._shape_cache[("base", 1)], SIZE)
+        for i, fr in enumerate(self.walk_frames):
+            canvas = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+            canvas.paste(fr, ((SIZE - fr.size[0]) // 2, (SIZE - fr.size[1]) // 2), fr)
+            self._shape_cache[("walk", i, 1)] = shape_rects(canvas)
+            self._shape_cache[("walk", i, -1)] = mirror_rects(
+                self._shape_cache[("walk", i, 1)], SIZE)
         self.facing = 1          # 1 = right, -1 = left
         self.bob = 0             # walk bounce phase
         self.squash = 0          # squash & stretch timer
@@ -418,37 +463,29 @@ class Nekopet(tk.Tk):
         except Exception:
             self._xshape = None
 
-    def _apply_shape(self, final_img):
-        """Clip the window to the final displayed image's opaque pixels.
+    def _apply_shape(self, frame_key):
+        """Clip the window to the sprite's opaque pixels.
 
-        Called every frame with the exact SIZE×SIZE image shown on screen,
-        so mask and display can never drift out of alignment. Uses
-        shape_rectangles (opaque runs per row) — a single X request with
-        no bitmap bit-order or padding pitfalls.
+        Shape rects are precomputed once per frame; each call is a single
+        shape_rectangles X request, skipped entirely when the frame hasn't
+        changed since the last call.
         """
+        if NO_SHAPE or self._shape_key == frame_key:
+            return
         self._init_xshape()
         if not self._xshape:
             return
         try:
             xs = self._xshape
             d, SK, SO = xs["d"], xs["SK"], xs["SO"]
-            w, h = final_img.size
-            px = final_img.split()[3].load()
-            rects = []
-            for y in range(h):
-                x = 0
-                while x < w:
-                    while x < w and px[x, y] <= 100:
-                        x += 1
-                    x0 = x
-                    while x < w and px[x, y] > 100:
-                        x += 1
-                    if x > x0:
-                        rects.append((x0, y, x - x0, 1))
             win = d.create_resource_object("window", self.winfo_id())
             # ordering=2 (YXSorted): rects are built top-to-bottom, left-to-right
-            win.shape_rectangles(SO.Set, SK.Bounding, 2, 0, 0, rects)
-            d.sync()
+            win.shape_rectangles(SO.Set, SK.Bounding, 2, 0, 0,
+                                 self._shape_cache[frame_key])
+            # flush() not sync(): push the request out without blocking on a
+            # round-trip (sync() starves the tick loop on XWayland -> freeze)
+            d.flush()
+            self._shape_key = frame_key
         except Exception:
             self._xshape = None  # don't keep retrying a broken path
 
@@ -463,8 +500,11 @@ class Nekopet(tk.Tk):
             self.walk_phase += 1
             idx = (self.walk_phase // 4) % len(self.walk_frames)
             img = self.walk_frames[idx]
+            frame_key = ("walk", idx, self.facing)
         else:
             img = self.base
+            idx = 0
+            frame_key = ("base", self.facing)
         if self.facing < 0:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         # walk bounce + squash & stretch
@@ -476,12 +516,10 @@ class Nekopet(tk.Tk):
             # fillcolor=transparent: rotate() defaults to opaque black fill
             img = img.rotate(tilt, resample=Image.BICUBIC, expand=False,
                              fillcolor=(0, 0, 0, 0))
-        # composite onto a full SIZE×SIZE canvas, sprite centered: this exact
-        # image is both displayed AND used for the shape mask, so the two
-        # can never drift out of alignment
+        # composite onto a full SIZE×SIZE canvas, sprite centered
         final = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
         final.paste(img, ((SIZE - img.size[0]) // 2, (SIZE - img.size[1]) // 2), img)
-        self._apply_shape(final)
+        self._apply_shape(frame_key)
         self.frame = ImageTk.PhotoImage(final)
         self.img_label.config(image=self.frame)
         self.img_label.place(x=0, y=-int(bounce), width=SIZE, height=SIZE)
