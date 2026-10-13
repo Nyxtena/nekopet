@@ -380,36 +380,47 @@ class Nekopet(tk.Tk):
         try:
             from Xlib import X, display
             from Xlib.ext.shape import SK, SO
-            d = display.Display()
+            import contextlib, io
+            with contextlib.redirect_stderr(io.StringIO()):
+                # silences "xauth: warning, no xauthority details available"
+                d = display.Display()
             if not d.query_extension("SHAPE"):
                 return
             self._xshape = {"d": d, "X": X, "SK": SK, "SO": SO}
         except Exception:
             self._xshape = None
 
-    def _apply_shape(self, pil_img, shape_key):
-        """Clip the window to the sprite's opaque pixels. Cached by key."""
-        if self._shape_key == shape_key:
-            return
+    def _apply_shape(self, final_img):
+        """Clip the window to the final displayed image's opaque pixels.
+
+        Called every frame with the exact SIZE×SIZE image shown on screen,
+        so mask and display can never drift out of alignment. Uses
+        shape_rectangles (opaque runs per row) — a single X request with
+        no bitmap bit-order or padding pitfalls.
+        """
         self._init_xshape()
         if not self._xshape:
             return
         try:
             xs = self._xshape
-            d, X, SK, SO = xs["d"], xs["X"], xs["SK"], xs["SO"]
-            W32 = 160  # multiple of 32: immune to server bitmap_pad quirks
-            canvas = Image.new("RGBA", (W32, SIZE), (0, 0, 0, 0))
-            canvas.paste(pil_img, (0, 0), pil_img)
-            mask = canvas.split()[3].point(
-                lambda a: 255 if a > 100 else 0).convert("1")
-            w, h = mask.size
+            d, SK, SO = xs["d"], xs["SK"], xs["SO"]
+            w, h = final_img.size
+            px = final_img.split()[3].load()
+            rects = []
+            for y in range(h):
+                x = 0
+                while x < w:
+                    while x < w and px[x, y] <= 100:
+                        x += 1
+                    x0 = x
+                    while x < w and px[x, y] > 100:
+                        x += 1
+                    if x > x0:
+                        rects.append((x0, y, x - x0, 1))
             win = d.create_resource_object("window", self.winfo_id())
-            pm = win.create_pixmap(w, h, 1)
-            gc = pm.create_gc(foreground=1, background=0)
-            pm.put_image(gc, 0, 0, w, h, X.XYBitmap, 1, 0, mask.tobytes())
-            win.shape_mask(SO.Set, SK.Bounding, 0, 0, pm.id)
+            # ordering=2 (YXSorted): rects are built top-to-bottom, left-to-right
+            win.shape_rectangles(SO.Set, SK.Bounding, 2, 0, 0, rects)
             d.sync()
-            self._shape_key = shape_key
         except Exception:
             self._xshape = None  # don't keep retrying a broken path
 
@@ -419,16 +430,13 @@ class Nekopet(tk.Tk):
 
     def render(self):
         moving = self.state in self.WALK_STATES
-        shape_key = None
         if moving and self.walk_frames:
             # real walk cycle: advance a frame every few ticks
             self.walk_phase += 1
             idx = (self.walk_phase // 4) % len(self.walk_frames)
             img = self.walk_frames[idx]
-            shape_key = ("walk", idx, self.facing)
         else:
             img = self.base
-            shape_key = ("base", self.facing)
         if self.facing < 0:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         # walk bounce + squash & stretch
@@ -437,9 +445,16 @@ class Nekopet(tk.Tk):
         if self.state == "sit":
             img = img.resize((SIZE, int(SIZE * 0.82)), Image.LANCZOS)
         if tilt:
-            img = img.rotate(tilt, resample=Image.BICUBIC, expand=False)
-        self._apply_shape(img, shape_key)
-        self.frame = ImageTk.PhotoImage(img)
+            # fillcolor=transparent: rotate() defaults to opaque black fill
+            img = img.rotate(tilt, resample=Image.BICUBIC, expand=False,
+                             fillcolor=(0, 0, 0, 0))
+        # composite onto a full SIZE×SIZE canvas, sprite centered: this exact
+        # image is both displayed AND used for the shape mask, so the two
+        # can never drift out of alignment
+        final = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
+        final.paste(img, ((SIZE - img.size[0]) // 2, (SIZE - img.size[1]) // 2), img)
+        self._apply_shape(final)
+        self.frame = ImageTk.PhotoImage(final)
         self.img_label.config(image=self.frame)
         self.img_label.place(x=0, y=-int(bounce), width=SIZE, height=SIZE)
 
