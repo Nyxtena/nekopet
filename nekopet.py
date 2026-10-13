@@ -46,6 +46,19 @@ BOREDOM_S = (20, 45)          # idle before choosing a new antics
 DEBUG = "--debug" in sys.argv  # magenta box + console diagnostics, no transparency
 
 
+def key_out_background(img, thresh=245):
+    """Make near-white background pixels transparent (in place-safe copy)."""
+    img = img.convert("RGBA")
+    px = img.load()
+    w, h = img.size
+    for y in range(h):
+        for x in range(w):
+            r, g, b, a = px[x, y]
+            if r >= thresh and g >= thresh and b >= thresh:
+                px[x, y] = (r, g, b, 0)
+    return img
+
+
 # ------------------------------------------------------- window detection
 def get_window_rects(own_title="nekopet"):
     """Return [(x, y, w, h), ...] for visible windows, or [] if undetectable.
@@ -121,8 +134,8 @@ class Nekopet(tk.Tk):
         self.sh = self.winfo_screenheight()
 
         # sprite frames (PIL -> PhotoImage), rebuilt per-frame for animation
-        self.base = Image.open(SPRITE_PATH).convert("RGBA").resize(
-            (SIZE, SIZE), Image.LANCZOS)
+        self.base = key_out_background(
+            Image.open(SPRITE_PATH).resize((SIZE, SIZE), Image.LANCZOS))
         # walk cycle frames (side view, facing right)
         self.walk_frames = []
         for i in range(4):
@@ -130,8 +143,11 @@ class Nekopet(tk.Tk):
             if os.path.exists(wp):
                 fr = Image.open(wp).convert("RGBA")
                 s = SIZE / fr.size[1]
-                self.walk_frames.append(fr.resize((int(fr.size[0] * s), SIZE), Image.LANCZOS))
+                self.walk_frames.append(
+                    key_out_background(fr.resize((int(fr.size[0] * s), SIZE), Image.LANCZOS)))
         self.walk_phase = 0
+        self._xshape = None      # lazy X Shape extension state
+        self._shape_key = None
         self.facing = 1          # 1 = right, -1 = left
         self.bob = 0             # walk bounce phase
         self.squash = 0          # squash & stretch timer
@@ -350,18 +366,69 @@ class Nekopet(tk.Tk):
                 self.state, self.state_t = "idle", 20
         self.move_window()
 
+    # ------------------------------------------------- X11 window shaping
+    def _init_xshape(self):
+        """Set up X Shape extension for true per-pixel transparency.
+
+        tkinter's -transparentcolor is Windows/macOS-only; on Linux the
+        window stays a solid rectangle without this. Gracefully absent
+        when python-xlib is missing or SHAPE is unavailable (Wayland
+        without XWayland, etc.) — then the magenta box remains.
+        """
+        if DEBUG or self._xshape is not None:
+            return
+        try:
+            from Xlib import X, display
+            from Xlib.ext.shape import SK, SO
+            d = display.Display()
+            if not d.query_extension("SHAPE"):
+                return
+            self._xshape = {"d": d, "X": X, "SK": SK, "SO": SO}
+        except Exception:
+            self._xshape = None
+
+    def _apply_shape(self, pil_img, shape_key):
+        """Clip the window to the sprite's opaque pixels. Cached by key."""
+        if self._shape_key == shape_key:
+            return
+        self._init_xshape()
+        if not self._xshape:
+            return
+        try:
+            xs = self._xshape
+            d, X, SK, SO = xs["d"], xs["X"], xs["SK"], xs["SO"]
+            W32 = 160  # multiple of 32: immune to server bitmap_pad quirks
+            canvas = Image.new("RGBA", (W32, SIZE), (0, 0, 0, 0))
+            canvas.paste(pil_img, (0, 0), pil_img)
+            mask = canvas.split()[3].point(
+                lambda a: 255 if a > 100 else 0).convert("1")
+            w, h = mask.size
+            win = d.create_resource_object("window", self.winfo_id())
+            pm = win.create_pixmap(w, h, 1)
+            gc = pm.create_gc(foreground=1, background=0)
+            pm.put_image(gc, 0, 0, w, h, X.XYBitmap, 1, 0, mask.tobytes())
+            win.shape_mask(SO.Set, SK.Bounding, 0, 0, pm.id)
+            d.sync()
+            self._shape_key = shape_key
+        except Exception:
+            self._xshape = None  # don't keep retrying a broken path
+
     # ------------------------------------------------------------ rendering
     WALK_STATES = {"walk", "pounce", "climb_up", "climb_down", "win_climb_up",
                    "win_down", "climb_across", "win_across", "trapped"}
 
     def render(self):
         moving = self.state in self.WALK_STATES
+        shape_key = None
         if moving and self.walk_frames:
             # real walk cycle: advance a frame every few ticks
             self.walk_phase += 1
-            img = self.walk_frames[(self.walk_phase // 4) % len(self.walk_frames)]
+            idx = (self.walk_phase // 4) % len(self.walk_frames)
+            img = self.walk_frames[idx]
+            shape_key = ("walk", idx, self.facing)
         else:
             img = self.base
+            shape_key = ("base", self.facing)
         if self.facing < 0:
             img = img.transpose(Image.FLIP_LEFT_RIGHT)
         # walk bounce + squash & stretch
@@ -371,6 +438,7 @@ class Nekopet(tk.Tk):
             img = img.resize((SIZE, int(SIZE * 0.82)), Image.LANCZOS)
         if tilt:
             img = img.rotate(tilt, resample=Image.BICUBIC, expand=False)
+        self._apply_shape(img, shape_key)
         self.frame = ImageTk.PhotoImage(img)
         self.img_label.config(image=self.frame)
         self.img_label.place(x=0, y=-int(bounce), width=SIZE, height=SIZE)
